@@ -1,0 +1,20 @@
+import assert from 'node:assert/strict';
+import {samples,parseCSV,validateRows,mergeRecords,aggregate,growth} from '../dist/core.js';
+import {LocalRepository} from '../dist/repository.js';
+let count=0;function test(name,fn){fn();count++;console.log('PASS',name);}
+test('샘플 데이터 66행 및 3개 채널',()=>{assert.equal(samples().length,66);assert.equal(new Set(samples().map(r=>r.channel)).size,3);});
+test('BOM, CRLF, 따옴표, 셀 내 쉼표 CSV',()=>assert.deepEqual(parseCSV('\uFEFF월,제목\r\n2026-10,"물류, 자동화"\r\n'),[['월','제목'],['2026-10','물류, 자동화']]));
+test('닫히지 않은 따옴표 차단',()=>assert.throws(()=>parseCSV('a,"b')));
+const good=[['월','채널','조회노출','참여','팔로워증가'],['2026-11','유튜브','100','20','3']];
+test('정상 데이터 검증 및 변환',()=>{const r=validateRows(good);assert.equal(r.errors.length,0);assert.equal(r.records[0].impressions,100);});
+test('음수, 소수, 잘못된 월, 채널 차단',()=>assert.equal(validateRows([good[0],['2026-13','기타','-1','1.5','3']]).errors.length,1));
+test('파일 내 중복 차단',()=>assert.equal(validateRows([...good,good[1]]).errors.length,1));
+test('누락 열 차단',()=>assert.equal(validateRows([['월','채널']]).errors.length,1));
+test('빈 실적 차단',()=>assert.equal(validateRows([good[0]]).errors.length,1));
+test('동일 월 채널 대체, 재업로드 멱등성',()=>{const rs=validateRows(good).records;const merged=mergeRecords(samples(),rs);assert.equal(mergeRecords(merged,rs).length,67);assert.equal(merged.find(r=>r.month==='2026-11'&&r.channel==='youtube').impressions,100);});
+test('누적 합계와 증감률',()=>{assert.equal(aggregate([{impressions:100,engagement:2,followers:1},{impressions:50,engagement:3,followers:2}]).impressions,150);assert.equal(growth(120,100),'+20.0%');assert.equal(growth(0,0),'0.0%');assert.equal(growth(100,0),'비교 불가');});
+const memory=new Map();globalThis.localStorage={getItem:k=>memory.get(k)||null,setItem:(k,v)=>memory.set(k,v)};
+let repo=new LocalRepository();await repo.importRecords(validateRows(good).records);await repo.saveEvent({id:'test',title:'테스트',date:'2026-11-01',channel:'youtube',status:'기획'});repo=new LocalRepository();assert.equal((await repo.listRecords()).length,67);assert.equal((await repo.listEvents()).find(e=>e.id==='test').title,'테스트');console.log('PASS 실적·일정 새 인스턴스 복원');count++;
+await repo.saveEvent({id:'test',title:'수정',date:'2026-11-02',channel:'linkedin',status:'검토 중'});assert.equal((await repo.listEvents()).filter(e=>e.id==='test').length,1);await repo.deleteEvent('test');assert.equal((await repo.listEvents()).filter(e=>e.id==='test').length,0);console.log('PASS 일정 수정·삭제');count++;
+const before=await repo.listRecords();localStorage.setItem=()=>{throw Error('quota');};await assert.rejects(()=>repo.importRecords([{month:'2026-12',channel:'youtube',impressions:1,engagement:1,followers:1}]));assert.deepEqual(await repo.listRecords(),before);console.log('PASS 저장 실패 시 기존 데이터 보존');count++;
+console.log(`${count} tests passed`);
